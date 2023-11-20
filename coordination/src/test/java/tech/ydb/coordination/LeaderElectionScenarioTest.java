@@ -1,6 +1,7 @@
 package tech.ydb.coordination;
 
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.CompletableFuture;
@@ -268,6 +269,7 @@ public class LeaderElectionScenarioTest {
     @Test(timeout = 60_000)
     public void leaderElectionOnPureSessionsTest() throws InterruptedException {
         final String semaphoreName = "leader-election-semaphore";
+        final AtomicBoolean assertChecker = new AtomicBoolean(true);
         final int sessionCount = 10;
         final CountDownLatch latch1 = new CountDownLatch(sessionCount);
         List<CoordinationSession> sessions = Stream.generate(() -> client.createSession(path).join())
@@ -281,8 +283,8 @@ public class LeaderElectionScenarioTest {
                 session.createSemaphore(semaphoreName, 1)
                         .whenComplete((status, createSemaphoreTh) -> {
                                     latch1.countDown();
-                                    Assert.assertNull(createSemaphoreTh);
-                                    Assert.assertTrue(status == Status.SUCCESS &&
+                                    threadWorkAssert(assertChecker, createSemaphoreTh == null);
+                                    threadWorkAssert(assertChecker, status == Status.SUCCESS ||
                                             status.getCode() == StatusCode.ALREADY_EXISTS);
                                 }
                         )
@@ -294,7 +296,7 @@ public class LeaderElectionScenarioTest {
         sessions.forEach(session -> session
                 .acquireSemaphore(semaphoreName, 1, String.valueOf(session.getId()).getBytes(), Duration.ZERO)
                 .whenComplete((lease, acquireSemaphoreTh) -> {
-                            Assert.assertNull(acquireSemaphoreTh);
+                            threadWorkAssert(assertChecker, acquireSemaphoreTh == null);
                             if (lease.isValid()) {
                                 semaphore.complete(lease);
                                 leader.complete(session);
@@ -309,14 +311,15 @@ public class LeaderElectionScenarioTest {
 
         sessions.forEach(session -> session.describeSemaphore(semaphoreName, DescribeSemaphoreMode.WITH_OWNERS)
                 .whenComplete((result, th) -> {
-                    Assert.assertTrue(result.isSuccess());
-                    Assert.assertNull(th);
-                    Assert.assertArrayEquals(String.valueOf(leaderSession.getId()).getBytes(),
-                            result.getValue().getOwnersList().get(0).getData());
+                    threadWorkAssert(assertChecker, result.isSuccess());
+                    threadWorkAssert(assertChecker, th == null);
+                    threadWorkAssert(assertChecker, Arrays.equals(String.valueOf(leaderSession.getId()).getBytes(),
+                            result.getValue().getOwnersList().get(0).getData()));
                     latch3.countDown();
                 }));
 
         latch3.await();
+        Assert.assertTrue(assertChecker.get());
     }
 
     @After
@@ -329,11 +332,22 @@ public class LeaderElectionScenarioTest {
         Assert.assertTrue(result.join().isSuccess());
     }
 
+
     private static void awaitBarrier(CyclicBarrier barrier) {
         try {
             barrier.await();
         } catch (BrokenBarrierException | InterruptedException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    private void threadWorkAssert(AtomicBoolean atomicBoolean, boolean condition) {
+        if (!condition) {
+            atomicBoolean.set(false);
+            logger.warn("Thread work assert is fail.");
+            Arrays.stream(Thread.currentThread().getStackTrace())
+                    .map(StackTraceElement::toString)
+                    .forEach(logger::warn);
         }
     }
 }
