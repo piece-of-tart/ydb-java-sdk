@@ -100,7 +100,7 @@ public class Subscriber implements AutoCloseable {
 
         session.describeAndWatchSemaphore(
                 SEMAPHORE_NAME, DescribeSemaphoreMode.WITH_OWNERS, WatchSemaphoreMode.WATCH_DATA_AND_OWNERS
-        ).whenCompleteAsync(this::updateDescription);
+        ).whenComplete(this::updateDescription);
     }
 
     /**

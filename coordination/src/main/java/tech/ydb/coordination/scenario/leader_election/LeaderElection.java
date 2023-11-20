@@ -12,6 +12,7 @@ import java.util.function.Function;
 
 import javax.annotation.Nonnull;
 
+import org.graalvm.compiler.nodes.calc.IntegerDivRemNode.Op;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -197,8 +198,9 @@ public class LeaderElection implements AutoCloseable {
      * @return Completable future of leader's endpoint.
      */
     public synchronized CompletableFuture<Optional<String>> forceUpdateLeaderAsync() {
+        CompletableFuture<Optional<String>> leaderAsync = getLeaderAsync();
         changedEventFuture.complete(new SemaphoreChangedEvent(false, false, false));
-        return getLeaderAsync();
+        return leaderAsync;
     }
 
     /**
