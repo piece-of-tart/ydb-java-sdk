@@ -51,7 +51,10 @@ public class Subscriber implements AutoCloseable {
     }
 
     private void updateDescription(Result<SemaphoreWatcher> result, Throwable th) {
-        logger.info("\nupdateDescription debugging: {}\n {}\n{}\n", this, result, th);
+        logger.info("\nupdateDescription debugging: {}\n {}\n {}\n{}\n", this,
+                result,
+                result == null ? null : result.getValue().getDescription(),
+                th);
         if (isStopped) {
             return;
         }
