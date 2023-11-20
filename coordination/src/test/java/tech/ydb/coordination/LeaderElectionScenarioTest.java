@@ -119,7 +119,7 @@ public class LeaderElectionScenarioTest {
                 Assert.assertEquals(leader.get(), participant3.forceUpdateLeader().orElse("none"));
                 Assert.assertTrue(counter.await(40, TimeUnit.SECONDS));
             } catch (Exception e) {
-                    Assert.fail("Exception in leader election test.");
+                Assert.fail("Exception in leader election test.");
             }
         } catch (Exception e) {
             Assert.fail("Exception in leader election test.");
