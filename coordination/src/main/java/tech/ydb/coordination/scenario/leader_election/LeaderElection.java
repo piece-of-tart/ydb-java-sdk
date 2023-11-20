@@ -7,6 +7,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -38,6 +39,7 @@ public class LeaderElection implements AutoCloseable {
     private CompletableFuture<SemaphoreLease> acquireFuture;
     private CompletableFuture<Optional<Session>> describeFuture;
     private CompletableFuture<SemaphoreChangedEvent> changedEventFuture;
+    private final AtomicInteger numberOfDescribeRequestsAtThisMoment = new AtomicInteger(0);
 
     private LeaderElection(CoordinationSession session, String name, byte[] data,
                            LeadershipPolicy policy,
@@ -92,10 +94,14 @@ public class LeaderElection implements AutoCloseable {
     }
 
     private CompletableFuture<SemaphoreChangedEvent> recursiveDescribeDetail() {
-        return session.describeAndWatchSemaphore(name,
+        CompletableFuture<Result<SemaphoreWatcher>> descAndWatchFuture = session.describeAndWatchSemaphore(name,
                         DescribeSemaphoreMode.WITH_OWNERS,
-                        WatchSemaphoreMode.WATCH_OWNERS)
-                .handle((semaphoreWatcherResult, th) -> {
+                        WatchSemaphoreMode.WATCH_OWNERS);
+        numberOfDescribeRequestsAtThisMoment.incrementAndGet();
+        return descAndWatchFuture.handle((semaphoreWatcherResult, th) -> {
+                    if (numberOfDescribeRequestsAtThisMoment.getAndDecrement() > 1) {
+                        return new CompletableFuture<SemaphoreChangedEvent>();
+                    }
                     if (th != null) {
                         CompletableFuture<Boolean> callback = new CompletableFuture<>();
                         if (isSemaphoreExistenceException(th, () -> callback.complete(true))) {
@@ -138,7 +144,8 @@ public class LeaderElection implements AutoCloseable {
                 return;
             }
             logger.warn("Exception when trying to check changes at the semaphore:" +
-                    " (semaphore changed event: {}, throwable: {})", semaphoreChangedEvent, th);
+                    " (semaphore changed event: {}, throwable: {}, isElecting: {})", semaphoreChangedEvent, th,
+                    isElecting.get());
             isElecting.set(false);
         });
     }

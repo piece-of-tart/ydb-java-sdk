@@ -35,7 +35,6 @@ public class LeaderElectionScenarioTest {
     @ClassRule
     public static final GrpcTransportRule YDB_TRANSPORT = new GrpcTransportRule();
     private static final Logger logger = LoggerFactory.getLogger(LeaderElectionScenarioTest.class);
-    private static final String SEMAPHORE_PREFIX = "leader-election-";
     private final String path = YDB_TRANSPORT.getDatabase() + "/coordination-node";
     private final CoordinationClient client = CoordinationClient.newClient(YDB_TRANSPORT);
 
@@ -61,6 +60,7 @@ public class LeaderElectionScenarioTest {
                 .withLeadershipPolicy(LeadershipPolicy.TAKE_LEADERSHIP)
                 .withTakeLeadershipObserver(leaderElection -> {
                     leader.set("endpoint-1");
+                    logger.info("Endpoint-1 is the leader now!");
                     awaitBarrier(barrier);
                 }).build();
 
@@ -69,6 +69,7 @@ public class LeaderElectionScenarioTest {
                  .withLeadershipPolicy(LeadershipPolicy.TAKE_LEADERSHIP)
                  .withTakeLeadershipObserver(leaderElection -> {
                      leader.set("endpoint-2");
+                     logger.info("Endpoint-2 is the leader now!");
                      awaitBarrier(barrier);
                  }).build()
         ) {
@@ -92,6 +93,7 @@ public class LeaderElectionScenarioTest {
                     .withLeadershipPolicy(LeadershipPolicy.TAKE_LEADERSHIP)
                     .withTakeLeadershipObserver(leaderElection -> {
                         leader.set("endpoint-3");
+                        logger.info("Endpoint-3 is the leader now!");
                         awaitBarrier(barrier);
                     })
                     .withChangeLeaderObserver(leaderElection -> counter.countDown()).build()
