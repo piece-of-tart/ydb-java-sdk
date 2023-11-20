@@ -57,44 +57,47 @@ public class ServiceDiscoveryScenarioTest {
             final Worker worker2 = Worker.newWorker(client, path, "endpoint-2", timeout);
 
             /* The First knows about The Second */
-            final Subscriber subscriber1 = Subscriber.newSubscriber(client, path);
-            SemaphoreDescription subscriberOneDescription = subscriber1.getDescription();
-            Assert.assertTrue(subscriberOneDescription
-                    .getOwnersList()
-                    .stream()
-                    .anyMatch(semaphoreSession -> "endpoint-2".equals(new String(semaphoreSession.getData())))
-            );
-            Assert.assertEquals(2, subscriberOneDescription.getOwnersList().size());
+            try (Subscriber subscriber1 = Subscriber.newSubscriber(client, path)) {
+                SemaphoreDescription subscriberOneDescription = subscriber1.getDescription();
+                Assert.assertTrue(subscriberOneDescription
+                        .getOwnersList()
+                        .stream()
+                        .anyMatch(semaphoreSession -> "endpoint-2".equals(new String(semaphoreSession.getData())))
+                );
+                Assert.assertEquals(2, subscriberOneDescription.getOwnersList().size());
 
-            /* The Second knows about The First */
-            final Subscriber subscriber2 = Subscriber.newSubscriber(client, path);
-            subscriberOneDescription = subscriber2.getDescription();
-            Assert.assertTrue(subscriberOneDescription
-                    .getOwnersList()
-                    .stream()
-                    .anyMatch(semaphoreSession -> "endpoint-1".equals(new String(semaphoreSession.getData())))
-            );
-            Assert.assertEquals(2, subscriberOneDescription.getOwnersList().size());
+                /* The Second knows about The First */
+                try (Subscriber subscriber2 = Subscriber.newSubscriber(client, path)) {
+                    subscriberOneDescription = subscriber2.getDescription();
+                    Assert.assertTrue(subscriberOneDescription
+                            .getOwnersList()
+                            .stream()
+                            .anyMatch(semaphoreSession -> "endpoint-1".equals(new String(semaphoreSession.getData())))
+                    );
+                    Assert.assertEquals(2, subscriberOneDescription.getOwnersList().size());
 
-            /* Remove The First worker */
-            final CountDownLatch stopFirstWorkerLatch = new CountDownLatch(1);
-            subscriber2.setUpdateWaiter(stopFirstWorkerLatch::countDown);
+                    /* Remove The First worker */
+                    final CountDownLatch stopFirstWorkerLatch = new CountDownLatch(1);
+                    subscriber2.setUpdateWaiter(stopFirstWorkerLatch::countDown);
 
-            final boolean stoppedWorker1 = worker1.stop();
-            Assert.assertTrue(stoppedWorker1);
+                    final boolean stoppedWorker1 = worker1.stop();
+                    Assert.assertTrue(stoppedWorker1);
 
-            Assert.assertTrue(stopFirstWorkerLatch.await(60, TimeUnit.SECONDS));
-            final SemaphoreDescription removeDescription = subscriber2.getDescription();
-            Assert.assertEquals(1, removeDescription.getOwnersList().size());
-            Assert.assertEquals("endpoint-2", new String(removeDescription.getOwnersList().get(0).getData()));
-            Assert.assertEquals(removeDescription,
-                    checkSession.describeSemaphore(Worker.SEMAPHORE_NAME, DescribeSemaphoreMode.WITH_OWNERS).join()
-                            .getValue());
+                    Assert.assertTrue(stopFirstWorkerLatch.await(60, TimeUnit.SECONDS));
+                    final SemaphoreDescription removeDescription = subscriber2.getDescription();
+                    Assert.assertEquals(1, removeDescription.getOwnersList().size());
+                    Assert.assertEquals("endpoint-2", new String(removeDescription.getOwnersList().get(0).getData()));
+                    Assert.assertEquals(removeDescription,
+                            checkSession.describeSemaphore(Worker.SEMAPHORE_NAME, DescribeSemaphoreMode.WITH_OWNERS)
+                                    .join()
+                                    .getValue());
 
-            Assert.assertTrue(worker2.stop());
+                    Assert.assertTrue(worker2.stop());
 
-            Status remove = checkSession.deleteSemaphore(Worker.SEMAPHORE_NAME, true).join();
-            Assert.assertTrue(remove.isSuccess());
+                    Status remove = checkSession.deleteSemaphore(Worker.SEMAPHORE_NAME, true).join();
+                    Assert.assertTrue(remove.isSuccess());
+                }
+            }
         } catch (Exception e) {
             Assert.fail("There shouldn't be an exception.");
         }
