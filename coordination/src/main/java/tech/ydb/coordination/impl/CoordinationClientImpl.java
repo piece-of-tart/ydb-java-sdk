@@ -6,6 +6,7 @@ import tech.ydb.coordination.CoordinationClient;
 import tech.ydb.coordination.CoordinationSession;
 import tech.ydb.coordination.rpc.CoordinationRpc;
 import tech.ydb.coordination.settings.CoordinationNodeSettings;
+import tech.ydb.coordination.settings.CoordinationSessionSettings;
 import tech.ydb.coordination.settings.DescribeCoordinationNodeSettings;
 import tech.ydb.coordination.settings.DropCoordinationNodeSettings;
 import tech.ydb.core.Status;
@@ -30,8 +31,8 @@ public class CoordinationClientImpl implements CoordinationClient {
     }
 
     @Override
-    public CoordinationSession createSession() {
-        return new CoordinationSessionImpl(coordinationRpc.session());
+    public CompletableFuture<CoordinationSession> createSession(String path, CoordinationSessionSettings settings) {
+        return CoordinationSessionImpl.newSession(coordinationRpc, path, settings);
     }
 
     @Override

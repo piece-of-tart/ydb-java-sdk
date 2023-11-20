@@ -42,8 +42,8 @@ public class GrpcTransportBuilder {
     private Executor callExecutor = MoreExecutors.directExecutor();
     private AuthRpcProvider<? super GrpcAuthRpc> authProvider = NopAuthProvider.INSTANCE;
     private long readTimeoutMillis = 0;
-    private long connectTimeoutMillis = 5000;
-    private long discoveryTimeoutMillis = 30_000;
+    private long connectTimeoutMillis = 30_000;
+    private long discoveryTimeoutMillis = 60_000;
     private boolean useDefaultGrpcResolver = false;
     private GrpcCompression compression = GrpcCompression.NO_COMPRESSION;
 
@@ -287,5 +287,11 @@ public class GrpcTransportBuilder {
             impl.close();
             throw ex;
         }
+    }
+
+    public GrpcTransport buildAsync(Runnable ready) {
+        YdbTransportImpl impl = new YdbTransportImpl(this);
+        impl.initAsync(ready);
+        return impl;
     }
 }

@@ -12,7 +12,8 @@ import io.grpc.ExperimentalApi;
 @ExperimentalApi("Topic service interfaces are experimental and may change without notice")
 public interface Message {
     /**
-     * @return Message byte data
+     * @return Message byte data.
+     * @throws DecompressionException in case of decompression error. Raw data can be retrieved this exception
      */
     byte[] getData();
 
@@ -57,7 +58,11 @@ public interface Message {
     PartitionSession getPartitionSession();
 
     /**
-     * Commit this message
+     * Commits this message
+     * If there was an error while committing, there is no point of retrying committing the same message:
+     * the whole PartitionSession should be shut down by that time. And if commit hadn't reached the server,
+     * it will resend all these messages in next PartitionSession.
+     *
      * @return CompletableFuture that will be completed when commit confirmation from server will be received
      */
     CompletableFuture<Void> commit();

@@ -1,72 +1,115 @@
 package tech.ydb.coordination;
 
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CopyOnWriteArraySet;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
+import org.junit.After;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.ClassRule;
 import org.junit.Test;
-import tech.ydb.coordination.scenario.service_discovery.ServiceDiscoveryPublisher;
-import tech.ydb.coordination.scenario.service_discovery.ServiceDiscoverySubscriber;
+
+import tech.ydb.coordination.description.SemaphoreDescription;
+import tech.ydb.coordination.scenario.service_discovery.Subscriber;
+import tech.ydb.coordination.scenario.service_discovery.Worker;
+import tech.ydb.coordination.settings.CoordinationNodeSettings;
+import tech.ydb.coordination.settings.DescribeSemaphoreMode;
+import tech.ydb.coordination.settings.DropCoordinationNodeSettings;
+import tech.ydb.core.Status;
 import tech.ydb.test.junit4.GrpcTransportRule;
 
-/**
- * @author Kirill Kurdyukov
- */
 public class ServiceDiscoveryScenarioTest {
-
     @ClassRule
-    public final static GrpcTransportRule ydbTransport = new GrpcTransportRule();
+    public static final GrpcTransportRule YDB_TRANSPORT = new GrpcTransportRule();
+    private final String path = YDB_TRANSPORT.getDatabase() + "/coordination-node";
+    private final Duration timeout = Duration.ofSeconds(60);
+    private final CoordinationClient client = CoordinationClient.newClient(YDB_TRANSPORT);
 
-    private final CoordinationClient client = CoordinationClient.newClient(ydbTransport);
-    private final String semaphoreName = "service-discovery-semaphore";
+    @Before
+    public void createNode() {
+        CompletableFuture<Status> result = client.createNode(
+                path,
+                CoordinationNodeSettings.newBuilder()
+                        .build()
+        );
 
-    @Test(timeout = Utils.TIMEOUT)
-    public void serviceDiscoveryScenarioFullTest() {
-        Set<String> hosts = Stream.of("localhost1", "localhost2")
-                .collect(Collectors.toCollection(CopyOnWriteArraySet::new));
-
-        List<ServiceDiscoveryPublisher> publishers = hosts.stream()
-                .map(endpoint -> Utils.getStart(ServiceDiscoveryPublisher.newBuilder(client, endpoint), semaphoreName))
-                .map(CompletableFuture::join)
-                .collect(Collectors.toList());
-
-        WrapperCompletableFuture<Set<String>> future = new WrapperCompletableFuture<>();
-
-        ServiceDiscoverySubscriber subscriber = Utils.getStart(ServiceDiscoverySubscriber.newBuilder(
-                        client,
-                        endpoints -> {
-                            if (hosts.size() == endpoints.size()) {
-                                future.complete(new HashSet<>(endpoints));
-                            }
-                        }
-                ), semaphoreName)
-                .join();
-
-        assertEndpoints(hosts, future);
-
-        future.clear();
-        hosts.add("localhost3");
-
-        publishers.add(Utils.getStart(
-                ServiceDiscoveryPublisher.newBuilder(client, "localhost3"),
-                semaphoreName
-        ).join());
-
-        assertEndpoints(hosts, future);
-
-        subscriber.stop();
-        publishers.forEach(ServiceDiscoveryPublisher::stop);
+        Assert.assertTrue(result.join().isSuccess());
     }
 
-    private static void assertEndpoints(Set<String> hosts, WrapperCompletableFuture<Set<String>> future) {
-        Set<String> endpoints = future.join();
+    @Test(timeout = 60_000)
+    public void serviceDiscoveryTest() {
+        try (CoordinationSession checkSession = client.createSession(path).join()) {
+            Status create = checkSession.createSemaphore(Worker.SEMAPHORE_NAME, 100).join();
+            Assert.assertTrue(create.isSuccess());
 
-        Assert.assertEquals(hosts, endpoints);
+            final Worker worker1 = Worker.newWorker(client, path, "endpoint-1", timeout);
+
+            final SemaphoreDescription oneWorkerDescription = checkSession
+                    .describeSemaphore(Worker.SEMAPHORE_NAME, DescribeSemaphoreMode.WITH_OWNERS)
+                    .join()
+                    .getValue();
+
+            Assert.assertEquals("endpoint-1", new String(oneWorkerDescription.getOwnersList().get(0).getData()));
+            Assert.assertEquals(1, oneWorkerDescription.getOwnersList().size());
+
+            final Worker worker2 = Worker.newWorker(client, path, "endpoint-2", timeout);
+
+            /* The First knows about The Second */
+            try (Subscriber subscriber1 = Subscriber.newSubscriber(client, path)) {
+                SemaphoreDescription subscriberOneDescription = subscriber1.getDescription();
+                Assert.assertTrue(subscriberOneDescription
+                        .getOwnersList()
+                        .stream()
+                        .anyMatch(semaphoreSession -> "endpoint-2".equals(new String(semaphoreSession.getData())))
+                );
+                Assert.assertEquals(2, subscriberOneDescription.getOwnersList().size());
+
+                /* The Second knows about The First */
+                try (Subscriber subscriber2 = Subscriber.newSubscriber(client, path)) {
+                    subscriberOneDescription = subscriber2.getDescription();
+                    Assert.assertTrue(subscriberOneDescription
+                            .getOwnersList()
+                            .stream()
+                            .anyMatch(semaphoreSession -> "endpoint-1".equals(new String(semaphoreSession.getData())))
+                    );
+                    Assert.assertEquals(2, subscriberOneDescription.getOwnersList().size());
+
+                    /* Remove The First worker */
+                    final CountDownLatch stopFirstWorkerLatch = new CountDownLatch(1);
+                    subscriber2.setUpdateWaiter(stopFirstWorkerLatch::countDown);
+
+                    final boolean stoppedWorker1 = worker1.stop();
+                    Assert.assertTrue(stoppedWorker1);
+
+                    Assert.assertTrue(stopFirstWorkerLatch.await(60, TimeUnit.SECONDS));
+                    final SemaphoreDescription removeDescription = subscriber2.getDescription();
+                    Assert.assertEquals(1, removeDescription.getOwnersList().size());
+                    Assert.assertEquals("endpoint-2", new String(removeDescription.getOwnersList().get(0).getData()));
+                    Assert.assertEquals(removeDescription,
+                            checkSession.describeSemaphore(Worker.SEMAPHORE_NAME, DescribeSemaphoreMode.WITH_OWNERS)
+                                    .join()
+                                    .getValue());
+
+                    Assert.assertTrue(worker2.stop());
+
+                    Status remove = checkSession.deleteSemaphore(Worker.SEMAPHORE_NAME, true).join();
+                    Assert.assertTrue(remove.isSuccess());
+                }
+            }
+        } catch (Exception e) {
+            Assert.fail("There shouldn't be an exception.");
+        }
+    }
+
+    @After
+    public void deleteNode() {
+        CompletableFuture<Status> result = client.dropNode(
+                path,
+                DropCoordinationNodeSettings.newBuilder()
+                        .build()
+        );
+        Assert.assertTrue(result.join().isSuccess());
     }
 }

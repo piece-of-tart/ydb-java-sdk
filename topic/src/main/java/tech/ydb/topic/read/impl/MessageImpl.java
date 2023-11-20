@@ -1,11 +1,13 @@
 package tech.ydb.topic.read.impl;
 
+import java.io.IOException;
 import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.Function;
 
+import tech.ydb.topic.read.DecompressionException;
 import tech.ydb.topic.read.Message;
+import tech.ydb.topic.read.OffsetsRange;
 import tech.ydb.topic.read.PartitionSession;
 
 /**
@@ -19,9 +21,11 @@ public class MessageImpl implements Message {
     private final Instant createdAt;
     private final String messageGroupId;
     private final BatchMeta batchMeta;
-    private final PartitionSession partitionSession;
-    private final Function<OffsetsRange, CompletableFuture<Void>> commitFunction;
+    private final PartitionSessionImpl partitionSession;
+    private final OffsetsRange offsetsToCommit;
+    private final CommitterImpl committer;
     private boolean isDecompressed = false;
+    private IOException exception = null;
 
     private MessageImpl(Builder builder) {
         this.data = builder.data;
@@ -32,16 +36,25 @@ public class MessageImpl implements Message {
         this.messageGroupId = builder.messageGroupId;
         this.batchMeta = builder.batchMeta;
         this.partitionSession = builder.partitionSession;
-        this.commitFunction = builder.commitFunction;
+        this.offsetsToCommit = new OffsetsRangeImpl(commitOffsetFrom, offset + 1);
+        this.committer = new CommitterImpl(partitionSession, 1, offsetsToCommit);
     }
 
     @Override
     public byte[] getData() {
+        if (exception != null) {
+            throw new DecompressionException("Error occurred while decoding a message",
+                    exception, data);
+        }
         return data;
     }
 
     public void setData(byte[] data) {
         this.data = data;
+    }
+
+    public void setException(IOException exception) {
+        this.exception = exception;
     }
 
     @Override
@@ -85,6 +98,10 @@ public class MessageImpl implements Message {
 
     @Override
     public PartitionSession getPartitionSession() {
+        return partitionSession.getSessionInfo();
+    }
+
+    public PartitionSessionImpl getPartitionSessionImpl() {
         return partitionSession;
     }
 
@@ -94,7 +111,11 @@ public class MessageImpl implements Message {
 
     @Override
     public CompletableFuture<Void> commit() {
-        return commitFunction.apply(new OffsetsRange(commitOffsetFrom, offset + 1));
+        return committer.commitImpl(false);
+    }
+
+    public OffsetsRange getOffsetsToCommit() {
+        return offsetsToCommit;
     }
 
     /**
@@ -108,8 +129,7 @@ public class MessageImpl implements Message {
         private Instant createdAt;
         private String messageGroupId;
         private BatchMeta batchMeta;
-        private PartitionSession partitionSession;
-        private Function<OffsetsRange, CompletableFuture<Void>> commitFunction;
+        private PartitionSessionImpl partitionSession;
 
         public Builder setData(byte[] data) {
             this.data = data;
@@ -146,13 +166,8 @@ public class MessageImpl implements Message {
             return this;
         }
 
-        public Builder setPartitionSession(PartitionSession partitionSession) {
+        public Builder setPartitionSession(PartitionSessionImpl partitionSession) {
             this.partitionSession = partitionSession;
-            return this;
-        }
-
-        public Builder setCommitFunction(Function<OffsetsRange, CompletableFuture<Void>> commitFunction) {
-            this.commitFunction = commitFunction;
             return this;
         }
 
