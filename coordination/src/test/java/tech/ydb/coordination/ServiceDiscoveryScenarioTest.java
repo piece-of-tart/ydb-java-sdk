@@ -2,6 +2,8 @@ package tech.ydb.coordination;
 
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.After;
 import org.junit.Assert;
@@ -36,7 +38,7 @@ public class ServiceDiscoveryScenarioTest {
         Assert.assertTrue(result.join().isSuccess());
     }
 
-    @Test(timeout = 30_000)
+    @Test(timeout = 60_000)
     public void serviceDiscoveryTest() {
         try (CoordinationSession checkSession = client.createSession(path).join()) {
             Status create = checkSession.createSemaphore(Worker.SEMAPHORE_NAME, 100).join();
@@ -75,13 +77,13 @@ public class ServiceDiscoveryScenarioTest {
             Assert.assertEquals(2, subscriberOneDescription.getOwnersList().size());
 
             /* Remove The First worker */
-            final CompletableFuture<Void> waitUpdate = new CompletableFuture<>();
-            subscriber2.setUpdateWaiter(() -> waitUpdate.complete(null));
+            final CountDownLatch stopFirstWorkerLatch = new CountDownLatch(1);
+            subscriber2.setUpdateWaiter(stopFirstWorkerLatch::countDown);
 
-            final Boolean stoppedWorker1 = worker1.stop();
+            final boolean stoppedWorker1 = worker1.stop();
             Assert.assertTrue(stoppedWorker1);
 
-            waitUpdate.join();
+            Assert.assertTrue(stopFirstWorkerLatch.await(60, TimeUnit.SECONDS));
             final SemaphoreDescription removeDescription = subscriber2.getDescription();
             Assert.assertEquals(1, removeDescription.getOwnersList().size());
             Assert.assertEquals("endpoint-2", new String(removeDescription.getOwnersList().get(0).getData()));

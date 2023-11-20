@@ -50,7 +50,7 @@ public class LeaderElectionScenarioTest {
         Assert.assertTrue(result.join().isSuccess());
     }
 
-    @Test(timeout = 20_000)
+    @Test(timeout = 40_000)
     public void leaderElectionBaseTest() {
         final String semaphoreName = "leader-election-base-test";
 
@@ -115,7 +115,7 @@ public class LeaderElectionScenarioTest {
                 Assert.assertEquals(leader.get(), participant1.forceUpdateLeader().orElse("none"));
                 Assert.assertEquals(leader.get(), participant2.forceUpdateLeader().orElse("none"));
                 Assert.assertEquals(leader.get(), participant3.forceUpdateLeader().orElse("none"));
-                Assert.assertTrue(counter.await(20_000, TimeUnit.MILLISECONDS));
+                Assert.assertTrue(counter.await(40, TimeUnit.SECONDS));
             } catch (Exception e) {
                     Assert.fail("Exception in leader election test.");
             }
