@@ -51,6 +51,7 @@ public class Subscriber implements AutoCloseable {
     }
 
     private void updateDescription(Result<SemaphoreWatcher> result, Throwable th) {
+        logger.info("\nupdateDescription debugging: {}\n {}\n{}\n", this, result, th);
         if (isStopped) {
             return;
         }
@@ -127,5 +128,15 @@ public class Subscriber implements AutoCloseable {
             isStopped = true;
             session.close();
         }
+    }
+
+    @Override
+    public String toString() {
+        return "Subscriber{" +
+                "session=" + session +
+                ", updateWaiter=" + updateWaiter +
+                ", description=" + description +
+                ", isStopped=" + isStopped +
+                '}';
     }
 }
