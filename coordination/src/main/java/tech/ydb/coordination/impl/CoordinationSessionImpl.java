@@ -1,266 +1,161 @@
 package tech.ydb.coordination.impl;
 
-import java.util.List;
+import java.time.Duration;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import tech.ydb.coordination.CoordinationSession;
-import tech.ydb.core.Issue;
+import tech.ydb.coordination.SemaphoreLease;
+import tech.ydb.coordination.description.SemaphoreChangedEvent;
+import tech.ydb.coordination.description.SemaphoreDescription;
+import tech.ydb.coordination.description.SemaphoreWatcher;
+import tech.ydb.coordination.rpc.CoordinationRpc;
+import tech.ydb.coordination.settings.CoordinationSessionSettings;
+import tech.ydb.coordination.settings.DescribeSemaphoreMode;
+import tech.ydb.coordination.settings.WatchSemaphoreMode;
+import tech.ydb.core.Result;
 import tech.ydb.core.Status;
-import tech.ydb.core.StatusCode;
-import tech.ydb.core.grpc.GrpcReadWriteStream;
-import tech.ydb.proto.StatusCodesProtos;
-import tech.ydb.proto.YdbIssueMessage;
-import tech.ydb.proto.coordination.SessionRequest;
-import tech.ydb.proto.coordination.SessionResponse;
 
-/**
- * @author Kirill Kurdyukov
- */
 public class CoordinationSessionImpl implements CoordinationSession {
-
-    private static final Logger logger = LoggerFactory.getLogger(CoordinationSessionImpl.class);
-
-    private final GrpcReadWriteStream<SessionResponse, SessionRequest> coordinationStream;
+    private static final Logger logger = LoggerFactory.getLogger(CoordinationSession.class);
+    private static final byte[] BYTE_ARRAY_STUB = new byte[0];
+    private final CoordinationRetryableStreamImpl stream;
     private final AtomicBoolean isWorking = new AtomicBoolean(true);
-    private final CompletableFuture<SessionResponse> stoppedFuture = new CompletableFuture<>();
     private final AtomicLong sessionId = new AtomicLong();
+    private final AtomicInteger lastId = new AtomicInteger(ThreadLocalRandom.current().nextInt());
 
-    public CoordinationSessionImpl(GrpcReadWriteStream<SessionResponse, SessionRequest> coordinationStream) {
-        this.coordinationStream = coordinationStream;
+    protected CoordinationSessionImpl(CoordinationRetryableStreamImpl stream) {
+        this.stream = stream;
+    }
+
+    public static CompletableFuture<CoordinationSession> newSession(CoordinationRpc rpc, String nodePath,
+            CoordinationSessionSettings settings) {
+        Executor executor = settings.getExecutor();
+        if (executor == null) {
+            executor = ForkJoinPool.commonPool();
+        }
+
+        final CoordinationRetryableStreamImpl stream = new CoordinationRetryableStreamImpl(rpc, executor, nodePath,
+                settings.getConnectTimeout(), settings.getReconnectBackoffDelay());
+        final CoordinationSessionImpl session = new CoordinationSessionImpl(stream);
+        final CompletableFuture<CoordinationSession> sessionStartFuture = CompletableFuture.completedFuture(session);
+        return session.start(settings.getConnectTimeout())
+                .thenAccept(session.sessionId::set)
+                .thenCompose(ignored -> sessionStartFuture);
+    }
+
+    private CompletableFuture<Long> start(Duration timeout) {
+        return stream.start(timeout);
     }
 
     @Override
-    public  long getSessionId() {
+    public CompletableFuture<Status> createSemaphore(String semaphoreName, long limit,
+                                                     byte[] data) {
+        if (data == null) {
+            data = BYTE_ARRAY_STUB;
+        }
+        final int semaphoreId = lastId.getAndIncrement();
+        logger.trace("Send createSemaphore {} with limit {}", semaphoreName, limit);
+        return stream.sendCreateSemaphore(semaphoreName, limit, data, semaphoreId);
+    }
+
+    @Override
+    public CompletableFuture<Result<SemaphoreLease>> acquireSemaphore(String name, long count, byte[] data,
+            Duration timeout) {
+        byte[] sepamhoreData = data != null ? data : BYTE_ARRAY_STUB;
+        final int reqId = lastId.getAndIncrement();
+        logger.trace("Send acquireSemaphore {} with count {}", name, count);
+        return stream.sendAcquireSemaphore(name, count, timeout, false, sepamhoreData, reqId)
+                .thenApply(r -> r.map(v -> new SemaphoreLeaseImpl(this, name)));
+    }
+
+    @Override
+    public CompletableFuture<Result<SemaphoreLease>> acquireEphemeralSemaphore(String name, boolean exclusive,
+            byte[] data, Duration timeout) {
+        byte[] sepamhoreData = data != null ? data : BYTE_ARRAY_STUB;
+        final int reqId = lastId.getAndIncrement();
+        logger.trace("Send acquireEphemeralSemaphore {}", name);
+        long limit = exclusive ? -1L : 1L;
+        return stream.sendAcquireSemaphore(name, limit, timeout, true, sepamhoreData, reqId)
+                .thenApply(r -> r.map(v -> new SemaphoreLeaseImpl(this, name)));
+    }
+
+    CompletableFuture<Boolean> releaseSemaphore(String name) {
+        final int semaphoreReleaseId = lastId.getAndIncrement();
+        logger.trace("Send releaseSemaphore {}", name);
+        return stream.sendReleaseSemaphore(name, semaphoreReleaseId).thenApply(Result::getValue);
+    }
+
+    @Override
+    public CompletableFuture<Status> updateSemaphore(String semaphoreName, byte[] data) {
+        if (data == null) {
+            data = BYTE_ARRAY_STUB;
+        }
+        return stream.sendUpdateSemaphore(semaphoreName, data, lastId.getAndIncrement());
+    }
+
+    @Override
+    public CompletableFuture<Result<SemaphoreDescription>> describeSemaphore(String name, DescribeSemaphoreMode mode) {
+        return stream.sendDescribeSemaphore(name, mode.includeOwners(), mode.includeWaiters());
+    }
+
+    @Override
+    public CompletableFuture<Result<SemaphoreWatcher>> describeAndWatchSemaphore(String name,
+            DescribeSemaphoreMode describeMode, WatchSemaphoreMode watchMode) {
+        final CompletableFuture<SemaphoreChangedEvent> changeFuture = new CompletableFuture<>();
+        return stream.sendDescribeSemaphore(name,
+                describeMode.includeOwners(), describeMode.includeWaiters(),
+                watchMode.watchData(), watchMode.watchOwners(),
+                changeFuture::complete
+        ).thenApply(r -> r.map(desc -> new SemaphoreWatcher(desc, changeFuture)));
+    }
+
+    @Override
+    public CompletableFuture<Status> deleteSemaphore(String semaphoreName, boolean force) {
+        return stream.sendDeleteSemaphore(semaphoreName, force, lastId.getAndIncrement());
+    }
+
+    @Override
+    public long getId() {
         return sessionId.get();
     }
 
     @Override
-    public CompletableFuture<Status> start(CoordinationSession.Observer observer) {
-        return coordinationStream.start(
-                message -> {
-                    if (logger.isTraceEnabled()) {
-                        logger.trace("Message received:\n{}", message);
-                    }
-
-                    if (message.hasSessionStopped()) {
-                        stoppedFuture.complete(message);
-
-                        return;
-                    }
-
-                    if (isWorking.get()) {
-                        switch (message.getResponseCase()) {
-                            case SESSION_STARTED:
-                                sessionId.set(message.getSessionStarted().getSessionId());
-
-                                observer.onSessionStarted();
-                                break;
-                            case PING:
-                                coordinationStream.sendNext(
-                                        SessionRequest.newBuilder().setPong(
-                                                SessionRequest.PingPong.newBuilder()
-                                                        .setOpaque(message.getPing().getOpaque())
-                                                        .build()
-                                        ).build()
-                                );
-                                break;
-                            case ACQUIRE_SEMAPHORE_RESULT:
-                                observer.onAcquireSemaphoreResult(
-                                        message.getAcquireSemaphoreResult().getAcquired(),
-                                        getStatus(
-                                                message.getAcquireSemaphoreResult().getStatus(),
-                                                message.getAcquireSemaphoreResult().getIssuesList()
-                                        )
-                                );
-                                break;
-                            case ACQUIRE_SEMAPHORE_PENDING:
-                                observer.onAcquireSemaphorePending();
-                                break;
-                            case FAILURE:
-                                observer.onFailure(
-                                        getStatus(
-                                                message.getFailure().getStatus(),
-                                                message.getFailure().getIssuesList()
-                                        )
-                                );
-                                break;
-                            case DESCRIBE_SEMAPHORE_RESULT:
-                                observer.onDescribeSemaphoreResult(
-                                        message.getDescribeSemaphoreResult().getSemaphoreDescription(),
-                                        getStatus(
-                                                message.getDescribeSemaphoreResult().getStatus(),
-                                                message.getDescribeSemaphoreResult().getIssuesList()
-                                        )
-                                );
-                                break;
-                            case DESCRIBE_SEMAPHORE_CHANGED:
-                                observer.onDescribeSemaphoreChanged(
-                                        message.getDescribeSemaphoreChanged().getDataChanged(),
-                                        message.getDescribeSemaphoreChanged().getOwnersChanged()
-                                );
-                                break;
-                            case DELETE_SEMAPHORE_RESULT:
-                                observer.onDeleteSemaphoreResult(
-                                        getStatus(
-                                                message.getDeleteSemaphoreResult().getStatus(),
-                                                message.getDeleteSemaphoreResult().getIssuesList()
-                                        )
-                                );
-                                break;
-                            case CREATE_SEMAPHORE_RESULT:
-                                observer.onCreateSemaphoreResult(
-                                        getStatus(
-                                                message.getCreateSemaphoreResult().getStatus(),
-                                                message.getCreateSemaphoreResult().getIssuesList()
-                                        )
-                                );
-                                break;
-                            case RELEASE_SEMAPHORE_RESULT:
-                                observer.onReleaseSemaphoreResult(
-                                        message.getReleaseSemaphoreResult().getReleased(),
-                                        getStatus(
-                                                message.getReleaseSemaphoreResult().getStatus(),
-                                                message.getReleaseSemaphoreResult().getIssuesList()
-                                        )
-                                );
-                                break;
-                            case UPDATE_SEMAPHORE_RESULT:
-                                observer.onUpdateSemaphoreResult(
-                                        message.getUpdateSemaphoreResult().getReqId(),
-                                        getStatus(
-                                                message.getUpdateSemaphoreResult().getStatus(),
-                                                message.getUpdateSemaphoreResult().getIssuesList()
-                                        )
-                                );
-                                break;
-                            case PONG:
-                                observer.onPong(
-                                        message.getPong().getOpaque()
-                                );
-                                break;
-                            default:
-                        }
-                    }
-                }
-        );
+    public boolean isClosed() {
+        return !isWorking.get();
     }
 
     @Override
-    public void sendStartSession(SessionRequest.SessionStart sessionStart) {
-        send(
-                SessionRequest.newBuilder()
-                        .setSessionStart(sessionStart)
-                        .build()
-        );
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof CoordinationSessionImpl)) {
+            return false;
+        }
+        CoordinationSessionImpl that = (CoordinationSessionImpl) o;
+        return Objects.equals(sessionId, that.sessionId);
     }
 
     @Override
-    public void sendPingPong(SessionRequest.PingPong pingPong) {
-        send(
-                SessionRequest.newBuilder()
-                        .setPing(pingPong)
-                        .build()
-        );
+    public int hashCode() {
+        return Math.toIntExact(sessionId.get());
     }
 
     @Override
-    public void sendAcquireSemaphore(SessionRequest.AcquireSemaphore acquireSemaphore) {
-        send(
-                SessionRequest.newBuilder()
-                        .setAcquireSemaphore(acquireSemaphore)
-                        .build()
-        );
-    }
-
-    @Override
-    public void sendReleaseSemaphore(SessionRequest.ReleaseSemaphore releaseSemaphore) {
-        send(
-                SessionRequest.newBuilder()
-                        .setReleaseSemaphore(releaseSemaphore)
-                        .build()
-        );
-    }
-
-    @Override
-    public void sendDescribeSemaphore(SessionRequest.DescribeSemaphore describeSemaphore) {
-        send(
-                SessionRequest.newBuilder()
-                        .setDescribeSemaphore(describeSemaphore)
-                        .build()
-        );
-    }
-
-    @Override
-    public void sendCreateSemaphore(SessionRequest.CreateSemaphore createSemaphore) {
-        send(
-                SessionRequest.newBuilder()
-                        .setCreateSemaphore(createSemaphore)
-                        .build()
-        );
-    }
-
-    @Override
-    public void sendUpdateSemaphore(SessionRequest.UpdateSemaphore updateSemaphore) {
-        send(
-                SessionRequest.newBuilder()
-                        .setUpdateSemaphore(updateSemaphore)
-                        .build()
-        );
-    }
-
-    @Override
-    public void sendDeleteSemaphore(SessionRequest.DeleteSemaphore deleteSemaphore) {
-        send(
-                SessionRequest.newBuilder()
-                        .setDeleteSemaphore(deleteSemaphore)
-                        .build()
-        );
-    }
-
-    @Override
-    public void stop() {
+    public void close() {
+        logger.trace("Close session with id={}", sessionId.get());
         if (isWorking.compareAndSet(true, false)) {
-            coordinationStream.sendNext(
-                    SessionRequest.newBuilder()
-                            .setSessionStop(
-                                    SessionRequest.SessionStop.newBuilder()
-                                            .build()
-                            ).build()
-            );
-
-            try {
-                stoppedFuture.get(10, TimeUnit.SECONDS);
-            } catch (Exception e) {
-                logger.error("Failed stopping awaiting", e);
-            }
-
-            coordinationStream.close();
+            stream.stop();
         }
-    }
-
-    private void send(SessionRequest sessionRequest) {
-        if (logger.isTraceEnabled()) {
-            logger.trace("Send message: {}", sessionRequest);
-        }
-
-        try {
-            coordinationStream.sendNext(sessionRequest);
-        } catch (IllegalStateException e) {
-            logger.error("Error sending message {}", sessionRequest, e);
-        }
-    }
-
-    private static Status getStatus(
-            StatusCodesProtos.StatusIds.StatusCode statusCode,
-            List<YdbIssueMessage.IssueMessage> issueMessages
-    ) {
-        return Status.of(StatusCode.fromProto(statusCode))
-                .withIssues(Issue.fromPb(issueMessages));
     }
 }
